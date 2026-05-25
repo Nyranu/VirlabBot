@@ -1,24 +1,30 @@
-from bot import load_schedule_tables, find_schedule_for_group, find_teacher_lessons
+from scheduleParser import ScheduleParser
 
 
-def run():
-    tables = load_schedule_tables(force=True)
-    print(f"Загружено таблиц: {len(tables)}")
-    for t in tables:
-        print(f"- {t.source} gid={t.gid} rows={len(t.df)} cols={len(t.df.columns)}")
+def runParserTests():
+    Parser = ScheduleParser()
+    try:
+        Tables = Parser.loadScheduleTables(Force=True)
+    except Exception as Error:
+        print(f"Ошибка загрузки таблиц: {Error}")
+        return
 
-    for group in ["ИСП11-125П", "ИСП-11-125П"]:
-        src, lessons = find_schedule_for_group(group, "понедельник")
-        print(f"\nГруппа {group} / понедельник / источник: {src or 'не найден'}")
-        for i, lesson in enumerate(lessons, 1):
-            print(f"{i}. {lesson}")
+    print(f"Загружено таблиц: {len(Tables)}")
+    for Table in Tables:
+        print(f"- {Table.Source} gid={Table.Gid} rows={len(Table.DataFrame)} cols={len(Table.DataFrame.columns)}")
 
-    for teacher in ["Филатова", "Жабкин", "Кобякова"]:
-        lessons = find_teacher_lessons(teacher)
-        print(f"\nПреподаватель {teacher}: найдено {len(lessons)}")
-        for i, lesson in enumerate(lessons[:10], 1):
-            print(f"{i}. {lesson}")
+    for GroupName in ["ИСП11-125П", "ИСП-11-125П"]:
+        Source, Lessons = Parser.findScheduleForGroup(GroupName, "понедельник")
+        print(f"\nГруппа {GroupName} / понедельник / источник: {Source or 'не найден'}")
+        for Number, Lesson in enumerate(Lessons, 1):
+            print(f"{Number}. {Lesson}")
+
+    for TeacherName in ["Филатова", "Жабкин", "Кобякова"]:
+        Lessons = Parser.findTeacherLessons(TeacherName)
+        print(f"\nПреподаватель {TeacherName}: найдено {len(Lessons)}")
+        for Number, Lesson in enumerate(Lessons[:10], 1):
+            print(f"{Number}. {Lesson}")
 
 
 if __name__ == "__main__":
-    run()
+    runParserTests()

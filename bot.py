@@ -1,57 +1,38 @@
 import os
-import re
-import time
 import sqlite3
-from io import StringIO
-from dataclasses import dataclass
+import datetime
 
-import pandas as pd
-import requests
 import telebot
 from dotenv import load_dotenv
 from telebot import types
 
+from scheduleParser import ScheduleParser
+
 
 load_dotenv()
 
-CACHE_TTL = 600
-DEBUG_PARSER = os.getenv("DEBUG_PARSER", "false").lower() == "true"
+BotToken = os.getenv("BOT_TOKEN") or os.getenv("Virlap-API-TOKEN")
+DbPath = os.getenv("DB_PATH") or os.getenv("DB-PATH") or "schedule_bot.db"
 
-BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("Virlap-API-TOKEN")
-DB_PATH = os.getenv("DB_PATH") or os.getenv("DB-PATH") or "schedule_bot.db"
-MAIN_SHEET_URL = os.getenv("MAIN_SHEET_URL") or os.getenv("main_gs")
-PRACTICE_SHEET_URL = os.getenv("PRACTICE_SHEET_URL") or os.getenv("PRACT_GS")
+if not BotToken:
+    raise RuntimeError("Не задан BOT_TOKEN")
 
-if not BOT_TOKEN:
-    raise RuntimeError("токена нема")
-
-bot = telebot.TeleBot(BOT_TOKEN)
-
-registration_cache = {}
-schedule_cache = {
-    "time": 0,
-    "tables": []
-}
+Bot = telebot.TeleBot(BotToken)
+RegistrationCache = {}
+Parser = ScheduleParser()
 
 
-@dataclass
-class SheetTable:
-    source: str
-    gid: str
-    df: pd.DataFrame
+def dbConnection():
+    Connection = sqlite3.connect(DbPath)
+    Connection.row_factory = sqlite3.Row
+    return Connection
 
 
-def db_connection():
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    return con
-
-
-def init_db():
-    con = db_connection()
-    cur = con.cursor()
-
-    cur.execute("""
+def initDb():
+    Connection = dbConnection()
+    Cursor = Connection.cursor()
+    Cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS users (
             telegram_id INTEGER PRIMARY KEY,
             full_name TEXT NOT NULL,
@@ -59,588 +40,197 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
-    """)
-
-    con.commit()
-    con.close()
-
-
-def get_user(telegram_id):
-    con = db_connection()
-    cur = con.cursor()
-
-    cur.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,))
-    row = cur.fetchone()
-
-    con.close()
-
-    return dict(row) if row else None
+        """
+    )
+    Connection.commit()
+    Connection.close()
 
 
-def save_user(telegram_id, full_name, group_name):
-    con = db_connection()
-    cur = con.cursor()
+def getUser(TelegramId):
+    Connection = dbConnection()
+    Cursor = Connection.cursor()
+    Cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (TelegramId,))
+    Row = Cursor.fetchone()
+    Connection.close()
+    return dict(Row) if Row else None
 
-    cur.execute("""
+
+def saveUser(TelegramId, FullName, GroupName):
+    Connection = dbConnection()
+    Cursor = Connection.cursor()
+    Cursor.execute(
+        """
         INSERT INTO users (telegram_id, full_name, group_name)
         VALUES (?, ?, ?)
         ON CONFLICT(telegram_id) DO UPDATE SET
             full_name = excluded.full_name,
             group_name = excluded.group_name,
             updated_at = CURRENT_TIMESTAMP
-    """, (telegram_id, full_name, group_name))
-
-    con.commit()
-    con.close()
-
-
-def normalize(text):
-    text = str(text).lower().replace("ё", "е")
-    return re.sub(r"[^a-zа-я0-9]", "", text)
-
-
-def debug_log(message):
-    if DEBUG_PARSER:
-        print(f"[DEBUG_PARSER] {message}")
-
-
-def clean_text(text):
-    return re.sub(r"\s+", " ", str(text).replace("\n", " ")).strip()
-
-
-def clean_df(df):
-    df = df.fillna("").astype(str)
-    df = df.apply(lambda col: col.map(clean_text))
-    df = df.loc[(df != "").any(axis=1), (df != "").any(axis=0)]
-    return df.reset_index(drop=True)
-
-
-def spreadsheet_id(url):
-    found = re.search(r"/spreadsheets/d/([^/]+)", url)
-    return found.group(1) if found else ""
-
-
-def get_gids(url):
-    gids = set(re.findall(r"gid=(\d+)", url))
-
-    try:
-        page = requests.get(url, timeout=20).text
-        gids.update(re.findall(r"gid=(\d+)", page))
-        gids.update(re.findall(r'"gid":(\d+)', page))
-    except Exception:
-        pass
-
-    if not gids:
-        gids.add("0")
-
-    return sorted(gids)
-
-
-def read_google_csv(sheet_id, gid):
-    csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid={gid}"
-    response = requests.get(csv_url, timeout=30)
-    response.raise_for_status()
-
-    text = response.text
-
-    if "<html" in text[:200].lower():
-        raise ValueError("Вместо CSV получена HTML-страница")
-
-    df = pd.read_csv(StringIO(text), header=None, dtype=str, keep_default_na=False)
-    return clean_df(df)
-
-
-def read_google_html(url):
-    result = []
-    tables = pd.read_html(url)
-
-    for i, table in enumerate(tables):
-        df = clean_df(table)
-
-        if not df.empty:
-            result.append(SheetTable("HTML", str(i), df))
-
-    return result
-
-
-def load_schedule_tables(force=False):
-    now = time.time()
-
-    if not force and schedule_cache["tables"] and now - schedule_cache["time"] < CACHE_TTL:
-        return schedule_cache["tables"]
-
-    all_tables = []
-
-    for source, url in [("Практики", PRACTICE_SHEET_URL), ("Основное расписание", MAIN_SHEET_URL)]:
-        if not url:
-            continue
-        sid = spreadsheet_id(url)
-        loaded_for_source = []
-
-        for gid in get_gids(url):
-            try:
-                df = read_google_csv(sid, gid)
-
-                if not df.empty:
-                    loaded_for_source.append(SheetTable(source, gid, df))
-            except Exception:
-                pass
-
-        if not loaded_for_source:
-            try:
-                for table in read_google_html(url):
-                    loaded_for_source.append(SheetTable(source, table.gid, table.df))
-            except Exception:
-                pass
-
-        all_tables.extend(loaded_for_source)
-        debug_log(f"{source}: загружено листов={len(loaded_for_source)}")
-
-    schedule_cache["time"] = now
-    schedule_cache["tables"] = all_tables
-    debug_log(f"Всего таблиц загружено: {len(all_tables)}")
-
-    return all_tables
-
-
-DAYS = {
-    "понедельник": "понедельник",
-    "пн": "понедельник",
-    "вторник": "вторник",
-    "вт": "вторник",
-    "среда": "среда",
-    "ср": "среда",
-    "четверг": "четверг",
-    "чт": "четверг",
-    "пятница": "пятница",
-    "пт": "пятница",
-    "суббота": "суббота",
-    "сб": "суббота",
-    "воскресенье": "воскресенье",
-    "вс": "воскресенье",
-}
-
-
-def detect_day(text):
-    low = str(text).lower().replace("ё", "е")
-
-    for key, value in DAYS.items():
-        if re.search(rf"(^|[^а-яa-z]){key}([^а-яa-z]|$)", low):
-            return value
-
-    return None
-
-
-def row_text(df, row_index):
-    values = [clean_text(x) for x in df.iloc[row_index].tolist()]
-    values = [x for x in values if x]
-    result = []
-
-    for value in values:
-        if value not in result:
-            result.append(value)
-
-    return " | ".join(result)
-
-
-def cell_has_group(cell, group):
-    return normalize_group(cell) == normalize_group(group) and normalize_group(group) != ""
-
-
-def normalize_group(value: str) -> str:
-    text = str(value).upper().replace("Ё", "Е")
-    text = re.sub(r"\s+", "", text)
-    text = text.replace("—", "-").replace("–", "-")
-    # ИСП11-125П -> ИСП-11-125П
-    text = re.sub(r"^([А-ЯA-Z]{2,6})-?(\d{1,2})-?(\d{2,4}[А-ЯA-Z]?)$", r"\1-\2-\3", text)
-    return text
-
-
-def extract_group_tokens(text: str):
-    raw = str(text).upper().replace("Ё", "Е").replace("\n", " ")
-    raw = raw.replace("—", "-").replace("–", "-")
-    matches = re.findall(r"[А-ЯA-Z]{2,6}\s*-?\s*\d{1,2}\s*-?\s*\d{2,4}[А-ЯA-Z]?", raw)
-    return {normalize_group(m) for m in matches if normalize_group(m)}
-
-
-def find_group_columns(df, group):
-    places = []
-    group_n = normalize_group(group)
-    if not group_n:
-        return places
-
-    for r in range(len(df)):
-        for c in range(len(df.columns)):
-            tokens = extract_group_tokens(df.iat[r, c])
-            if group_n in tokens:
-                places.append((r, c))
-
-    return places
-
-
-def make_lesson_line(df, row_index, group_col, group):
-    row = [clean_text(x) for x in df.iloc[row_index].tolist()]
-    subject = row[group_col] if group_col < len(row) else ""
-
-    if not subject:
-        return ""
-
-    if cell_has_group(subject, group):
-        return ""
-
-    if detect_day(subject):
-        return ""
-
-    prefix = []
-
-    for i in range(min(group_col, 3)):
-        value = row[i]
-
-        if value and not detect_day(value) and not cell_has_group(value, group):
-            prefix.append(value)
-
-    prefix_text = " ".join(prefix).strip()
-
-    if prefix_text:
-        return f"{prefix_text}: {subject}"
-
-    return subject
-
-
-def collect_group_schedule(tables, group, day):
-    found = []
-    seen = set()
-
-    for table in tables:
-        df = table.df
-        group_places = find_group_columns(df, group)
-        debug_log(f"{table.source} gid={table.gid}: найдено колонок группы={len(group_places)}")
-
-        for header_row, group_col in group_places:
-            current_day = None
-
-            for r in range(header_row + 1, len(df)):
-                text = row_text(df, r)
-                detected = detect_day(text)
-
-                if detected:
-                    current_day = detected
-
-                if current_day != day:
-                    continue
-
-                line = make_lesson_line(df, r, group_col, group)
-
-                if not line:
-                    continue
-
-                key = (table.source, table.gid, r, group_col, line)
-
-                if key not in seen:
-                    seen.add(key)
-                    found.append(line)
-    debug_log(f"Группа={group}, день={day}: строк найдено={len(found)}")
-
-    return found
-
-
-def find_schedule_for_group(group, day):
-    tables = load_schedule_tables()
-
-    main_tables = [t for t in tables if t.source == "Основное расписание"]
-    practice_tables = [t for t in tables if t.source == "Практики"]
-
-    result = collect_group_schedule(practice_tables, group, day)
-
-    if result:
-        return "Расписание практик", result
-
-    result = collect_group_schedule(main_tables, group, day)
-
-    if result:
-        return "Основное расписание", result
-
-    return "", []
-
-
-def find_teacher_lessons(teacher):
-    teacher_n = normalize(teacher)
-    tables = load_schedule_tables()
-    result = []
-    seen = set()
-
-    for table in tables:
-        df = table.df
-        current_day = None
-
-        for r in range(len(df)):
-            row_values = [clean_text(x) for x in df.iloc[r].tolist()]
-            text = " | ".join([x for x in row_values if x])
-            detected = detect_day(text)
-
-            if detected:
-                current_day = detected
-
-            for c, cell in enumerate(row_values):
-                cell_n = normalize(cell)
-                if not cell or not teacher_n or teacher_n not in cell_n:
-                    continue
-                if detect_day(cell):
-                    continue
-                # ищем группу сверху в этой же колонке
-                group_name = ""
-                for rr in range(r, -1, -1):
-                    tokens = extract_group_tokens(df.iat[rr, c])
-                    if tokens:
-                        group_name = sorted(tokens)[0]
-                        break
-                if not group_name:
-                    continue
-                left = " ".join([v for v in row_values[max(0, c - 3):c] if v and not detect_day(v)])
-                day_text = current_day if current_day else "день не указан"
-                line = f"{table.source} | {day_text} | группа: {group_name} | {left}\n{cell}"
-                key = normalize(line)
-                if key not in seen:
-                    seen.add(key)
-                    result.append(line)
-
-    return result[:30]
-
-
-def main_menu():
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("📅 Расписание на день", "👨‍🏫 Поиск преподавателя")
-    kb.add("👤 Мой профиль", "🔄 Обновить расписание")
-    return kb
-
-
-def days_keyboard():
-    kb = types.InlineKeyboardMarkup()
-
-    for day in [
-        "понедельник",
-        "вторник",
-        "среда",
-        "четверг",
-        "пятница",
-        "суббота"
-    ]:
-        kb.add(types.InlineKeyboardButton(day.capitalize(), callback_data=f"day:{day}"))
-
-    return kb
-
-
-def send_long(chat_id, text):
-    if len(text) <= 3900:
-        bot.send_message(chat_id, text)
+        """,
+        (TelegramId, FullName, GroupName),
+    )
+    Connection.commit()
+    Connection.close()
+
+
+def mainMenu():
+    Keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    Keyboard.add("📅 Расписание на день", "👨‍🏫 Поиск преподавателя")
+    Keyboard.add("👤 Мой профиль", "🔄 Обновить расписание")
+    return Keyboard
+
+
+def daysKeyboard():
+    Keyboard = types.InlineKeyboardMarkup()
+    for Day in ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота"]:
+        Keyboard.add(types.InlineKeyboardButton(Day.capitalize(), callback_data=f"day:{Day}"))
+    return Keyboard
+
+
+def sendLong(ChatId, Text):
+    if len(Text) <= 3900:
+        Bot.send_message(ChatId, Text)
+        return
+    for Index in range(0, len(Text), 3900):
+        Bot.send_message(ChatId, Text[Index:Index + 3900])
+
+
+def showSchedule(ChatId, GroupName, Day):
+    Source, Lessons = Parser.findScheduleForGroup(GroupName, Day)
+    if not Lessons:
+        Bot.send_message(ChatId, f"Расписание для группы {GroupName} на {Day} не найдено.")
         return
 
-    for i in range(0, len(text), 3900):
-        bot.send_message(chat_id, text[i:i + 3900])
+    Text = f"Расписание группы {GroupName} на {Day}\nИсточник: {Source}\n\n"
+    for Number, Lesson in enumerate(Lessons, 1):
+        Text += f"{Number}. {Lesson}\n"
+    sendLong(ChatId, Text)
 
 
-@bot.message_handler(commands=["start"])
-def start(message):
-    user = get_user(message.from_user.id)
-
-    if user:
-        bot.send_message(
-            message.chat.id,
-            f"Привет, {user['full_name']}!\nТвоя группа: {user['group_name']}",
-            reply_markup=main_menu()
-        )
+@Bot.message_handler(commands=["start"])
+def start(Message):
+    User = getUser(Message.from_user.id)
+    if User:
+        Bot.send_message(Message.chat.id, f"Привет, {User['full_name']}!\nТвоя группа: {User['group_name']}", reply_markup=mainMenu())
     else:
-        bot.send_message(
-            message.chat.id,
-            "Привет! Для начала нужно зарегистрироваться.\nНапиши /reg"
-        )
+        Bot.send_message(Message.chat.id, "Привет! Для начала нужно зарегистрироваться.\nНапиши /reg")
 
 
-@bot.message_handler(commands=["help"])
-def help_command(message):
-    bot.send_message(
-        message.chat.id,
-        "Команды:\n"
-        "/reg — регистрация\n"
-        "/day — расписание группы на день\n"
-        "/today — расписание на сегодня\n"
-        "/teacher — поиск занятий преподавателя\n"
-        "/profile — мой профиль\n"
-        "/refresh — обновить расписание"
-    )
+@Bot.message_handler(commands=["reg"])
+def regStart(Message):
+    Bot.send_message(Message.chat.id, "Введите ФИО:")
+    Bot.register_next_step_handler(Message, regFio)
 
 
-@bot.message_handler(commands=["reg"])
-def reg_start(message):
-    bot.send_message(message.chat.id, "Введите ФИО:")
-    bot.register_next_step_handler(message, reg_fio)
-
-
-def reg_fio(message):
-    full_name = clean_text(message.text)
-
-    if not full_name or full_name.startswith("/"):
-        bot.send_message(message.chat.id, "ФИО введено некорректно. Напиши /reg заново.")
+def regFio(Message):
+    FullName = Parser.cleanText(Message.text)
+    if not FullName or FullName.startswith("/"):
+        Bot.send_message(Message.chat.id, "ФИО введено некорректно. Напиши /reg заново.")
         return
+    RegistrationCache[Message.from_user.id] = {"FullName": FullName}
+    Bot.send_message(Message.chat.id, "Введите группу, например ИСП-11-125П:")
+    Bot.register_next_step_handler(Message, regGroup)
 
-    registration_cache[message.from_user.id] = {"full_name": full_name}
-    bot.send_message(message.chat.id, "Введите группу, например ИСП-11-125П:")
-    bot.register_next_step_handler(message, reg_group)
 
-
-def reg_group(message):
-    group_name = clean_text(message.text)
-
-    if not group_name or group_name.startswith("/"):
-        bot.send_message(message.chat.id, "Группа введена некорректно. Напиши /reg заново.")
+def regGroup(Message):
+    GroupName = Parser.cleanText(Message.text)
+    if not GroupName or GroupName.startswith("/"):
+        Bot.send_message(Message.chat.id, "Группа введена некорректно. Напиши /reg заново.")
         return
-
-    data = registration_cache.get(message.from_user.id)
-
-    if not data:
-        bot.send_message(message.chat.id, "Регистрация сброшена. Напиши /reg заново.")
+    Data = RegistrationCache.get(Message.from_user.id)
+    if not Data:
+        Bot.send_message(Message.chat.id, "Регистрация сброшена. Напиши /reg заново.")
         return
-
-    save_user(message.from_user.id, data["full_name"], group_name)
-    registration_cache.pop(message.from_user.id, None)
-
-    bot.send_message(
-        message.chat.id,
-        f"Регистрация завершена!\nФИО: {data['full_name']}\nГруппа: {group_name}",
-        reply_markup=main_menu()
-    )
+    saveUser(Message.from_user.id, Data["FullName"], GroupName)
+    RegistrationCache.pop(Message.from_user.id, None)
+    Bot.send_message(Message.chat.id, f"Регистрация завершена!\nФИО: {Data['FullName']}\nГруппа: {GroupName}", reply_markup=mainMenu())
 
 
-@bot.message_handler(commands=["profile"])
-def profile(message):
-    user = get_user(message.from_user.id)
-
-    if not user:
-        bot.send_message(message.chat.id, "Ты ещё не зарегистрирован. Напиши /reg")
+@Bot.message_handler(commands=["profile"])
+def profile(Message):
+    User = getUser(Message.from_user.id)
+    if not User:
+        Bot.send_message(Message.chat.id, "Ты ещё не зарегистрирован. Напиши /reg")
         return
-
-    bot.send_message(
-        message.chat.id,
-        f"ФИО: {user['full_name']}\nГруппа: {user['group_name']}"
-    )
+    Bot.send_message(Message.chat.id, f"ФИО: {User['full_name']}\nГруппа: {User['group_name']}")
 
 
-@bot.message_handler(commands=["day"])
-def choose_day(message):
-    user = get_user(message.from_user.id)
-
-    if not user:
-        bot.send_message(message.chat.id, "Сначала нужно зарегистрироваться. Напиши /reg")
+@Bot.message_handler(commands=["day"])
+def chooseDay(Message):
+    User = getUser(Message.from_user.id)
+    if not User:
+        Bot.send_message(Message.chat.id, "Сначала нужно зарегистрироваться. Напиши /reg")
         return
+    Bot.send_message(Message.chat.id, "Выбери день:", reply_markup=daysKeyboard())
 
-    bot.send_message(message.chat.id, "Выбери день:", reply_markup=days_keyboard())
 
-
-@bot.message_handler(commands=["today"])
-def today_schedule(message):
-    import datetime
-
-    user = get_user(message.from_user.id)
-
-    if not user:
-        bot.send_message(message.chat.id, "Сначала нужно зарегистрироваться. Напиши /reg")
+@Bot.message_handler(commands=["today"])
+def todaySchedule(Message):
+    User = getUser(Message.from_user.id)
+    if not User:
+        Bot.send_message(Message.chat.id, "Сначала нужно зарегистрироваться. Напиши /reg")
         return
-
-    weekday = datetime.datetime.now().weekday()
-    days = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-    day = days[weekday]
-
-    show_schedule(message.chat.id, user["group_name"], day)
+    Days = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+    Day = Days[datetime.datetime.now().weekday()]
+    showSchedule(Message.chat.id, User["group_name"], Day)
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("day:"))
-def day_callback(call):
-    user = get_user(call.from_user.id)
-
-    if not user:
-        bot.answer_callback_query(call.id, "Сначала нужно зарегистрироваться")
-        bot.send_message(call.message.chat.id, "Напиши /reg")
+@Bot.callback_query_handler(func=lambda Call: Call.data.startswith("day:"))
+def dayCallback(Call):
+    User = getUser(Call.from_user.id)
+    if not User:
+        Bot.answer_callback_query(Call.id, "Сначала нужно зарегистрироваться")
+        Bot.send_message(Call.message.chat.id, "Напиши /reg")
         return
+    Day = Call.data.split(":", 1)[1]
+    Bot.answer_callback_query(Call.id, "Ищу расписание...")
+    showSchedule(Call.message.chat.id, User["group_name"], Day)
 
-    day = call.data.split(":", 1)[1]
-    bot.answer_callback_query(call.id, "Ищу расписание...")
-    show_schedule(call.message.chat.id, user["group_name"], day)
+
+@Bot.message_handler(commands=["teacher"])
+def teacherStart(Message):
+    Bot.send_message(Message.chat.id, "Введите фамилию или ФИО преподавателя:")
+    Bot.register_next_step_handler(Message, teacherSearch)
 
 
-def show_schedule(chat_id, group, day):
-    source, lessons = find_schedule_for_group(group, day)
-
-    if not lessons:
-        bot.send_message(
-            chat_id,
-            f"Расписание для группы {group} на {day} не найдено.\n"
-            f"Возможно, группа указана иначе или расписание находится в другой вкладке таблицы."
-        )
+def teacherSearch(Message):
+    Teacher = Parser.cleanText(Message.text)
+    if not Teacher or Teacher.startswith("/"):
+        Bot.send_message(Message.chat.id, "Имя преподавателя введено некорректно. Напиши /teacher заново.")
         return
-
-    text = f"Расписание группы {group} на {day}\nИсточник: {source}\n\n"
-
-    for i, lesson in enumerate(lessons, 1):
-        text += f"{i}. {lesson}\n"
-
-    send_long(chat_id, text)
-
-
-@bot.message_handler(commands=["teacher"])
-def teacher_start(message):
-    bot.send_message(message.chat.id, "Введите фамилию или ФИО преподавателя:")
-    bot.register_next_step_handler(message, teacher_search)
-
-
-def teacher_search(message):
-    teacher = clean_text(message.text)
-
-    if not teacher or teacher.startswith("/"):
-        bot.send_message(message.chat.id, "Имя преподавателя введено некорректно. Напиши /teacher заново.")
+    Lessons = Parser.findTeacherLessons(Teacher)
+    if not Lessons:
+        Bot.send_message(Message.chat.id, f"Занятия преподавателя «{Teacher}» на этой неделе не найдены.")
         return
-
-    lessons = find_teacher_lessons(teacher)
-
-    if not lessons:
-        bot.send_message(message.chat.id, f"Занятия преподавателя «{teacher}» на этой неделе не найдены.")
-        return
-
-    text = f"Занятия преподавателя «{teacher}» на этой неделе:\n\n"
-
-    for i, lesson in enumerate(lessons, 1):
-        text += f"{i}. {lesson}\n\n"
-
-    send_long(message.chat.id, text)
+    Text = f"Занятия преподавателя «{Teacher}» на этой неделе:\n\n"
+    for Number, Lesson in enumerate(Lessons, 1):
+        Text += f"{Number}. {Lesson}\n\n"
+    sendLong(Message.chat.id, Text)
 
 
-@bot.message_handler(commands=["refresh"])
-def refresh(message):
-    load_schedule_tables(force=True)
-    bot.send_message(message.chat.id, "Расписание обновлено.")
+@Bot.message_handler(commands=["refresh"])
+def refresh(Message):
+    Parser.loadScheduleTables(Force=True)
+    Bot.send_message(Message.chat.id, "Расписание обновлено.")
 
 
-@bot.message_handler(content_types=["text"])
-def text_handler(message):
-    text = clean_text(message.text).lower()
-
-    if text == "📅 расписание на день":
-        choose_day(message)
-    elif text == "👨‍🏫 поиск преподавателя":
-        teacher_start(message)
-    elif text == "👤 мой профиль":
-        profile(message)
-    elif text == "🔄 обновить расписание":
-        refresh(message)
+@Bot.message_handler(content_types=["text"])
+def textHandler(Message):
+    Text = Parser.cleanText(Message.text).lower()
+    if Text == "📅 расписание на день":
+        chooseDay(Message)
+    elif Text == "👨‍🏫 поиск преподавателя":
+        teacherStart(Message)
+    elif Text == "👤 мой профиль":
+        profile(Message)
+    elif Text == "🔄 обновить расписание":
+        refresh(Message)
     else:
-        bot.send_message(
-            message.chat.id,
-            "Я не понял команду.\n"
-            "Используй меню или напиши /help"
-        )
+        Bot.send_message(Message.chat.id, "Я не понял команду.\nИспользуй меню или напиши /help")
 
 
 if __name__ == "__main__":
-    init_db()
-    load_schedule_tables(force=True)
+    initDb()
+    Parser.loadScheduleTables(Force=True)
     print("Бот запущен...")
-    bot.infinity_polling(skip_pending=True)
+    Bot.infinity_polling(skip_pending=True)
