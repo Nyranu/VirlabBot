@@ -11,8 +11,8 @@ from scheduleParser import ScheduleParser
 
 load_dotenv()
 
-BotToken = os.getenv("BOT_TOKEN") or os.getenv("Virlap-API-TOKEN")
-DbPath = os.getenv("DB_PATH") or os.getenv("DB-PATH") or "schedule_bot.db"
+BotToken = os.getenv("BOT_TOKEN")
+DbPath = os.getenv("DB_PATH", "schedule_bot.db")
 
 if not BotToken:
     raise RuntimeError("Не задан BOT_TOKEN")
@@ -231,6 +231,28 @@ def textHandler(Message):
 
 if __name__ == "__main__":
     initDb()
-    Parser.loadScheduleTables(Force=True)
+    try:
+        Parser.loadScheduleTables(Force=True)
+    except Exception as Error:
+        print(f"Не удалось загрузить расписание при запуске: {Error}")
     print("Бот запущен...")
-    Bot.infinity_polling(skip_pending=True)
+    while True:
+        try:
+            Bot.infinity_polling(skip_pending=True)
+        except Exception as Error:
+            print(f"Ошибка polling, повтор через 5 секунд: {Error}")
+            import time
+            time.sleep(5)
+@Bot.message_handler(commands=["help"])
+def helpCommand(Message):
+    Bot.send_message(
+        Message.chat.id,
+        "/reg — регистрация\n"
+        "/day — расписание группы на день\n"
+        "/today — расписание на сегодня\n"
+        "/teacher — поиск занятий преподавателя\n"
+        "/profile — мой профиль\n"
+        "/refresh — обновить расписание\n"
+        "/help — помощь",
+    )
+

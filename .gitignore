@@ -1,3 +1,4 @@
+.idea/
 .env
 schedule_bot.db
 __pycache__/

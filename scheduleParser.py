@@ -38,8 +38,8 @@ class ScheduleParser:
     }
 
     def __init__(self, MainSheetUrl=None, PracticeSheetUrl=None, DebugParser=None, CacheTtl=600):
-        self.MainSheetUrl = MainSheetUrl or os.getenv("MAIN_SHEET_URL") or os.getenv("main_gs")
-        self.PracticeSheetUrl = PracticeSheetUrl or os.getenv("PRACTICE_SHEET_URL") or os.getenv("PRACT_GS")
+        self.MainSheetUrl = MainSheetUrl or os.getenv("MAIN_SHEET_URL")
+        self.PracticeSheetUrl = PracticeSheetUrl or os.getenv("PRACTICE_SHEET_URL")
         self.DebugParser = (DebugParser if DebugParser is not None else os.getenv("DEBUG_PARSER", "false").lower() == "true")
         self.CacheTtl = CacheTtl
         self.ScheduleCache = {"Time": 0, "Tables": []}
@@ -87,13 +87,13 @@ class ScheduleParser:
         DataFrame = pd.read_csv(StringIO(Text), header=None, dtype=str, keep_default_na=False)
         return self.cleanDf(DataFrame)
 
-    def readGoogleHtml(self, Url):
+    def readGoogleHtml(self, Url, Source):
         Result = []
         Tables = pd.read_html(Url)
         for Index, Table in enumerate(Tables):
             DataFrame = self.cleanDf(Table)
             if not DataFrame.empty:
-                Result.append(SheetTable("HTML", str(Index), DataFrame))
+                Result.append(SheetTable(Source, str(Index), DataFrame))
         return Result
 
     def normalizeGroup(self, Value):
@@ -167,8 +167,8 @@ class ScheduleParser:
                     self.debugLog(f"{Source}: ошибка CSV gid={Gid}: {Error}")
             if not Loaded:
                 try:
-                    for Table in self.readGoogleHtml(Url):
-                        Loaded.append(SheetTable(Source, Table.Gid, Table.DataFrame))
+                    for Table in self.readGoogleHtml(Url, Source):
+                        Loaded.append(Table)
                     self.debugLog(f"{Source}: fallback HTML таблиц={len(Loaded)}")
                 except Exception as Error:
                     self.debugLog(f"{Source}: ошибка HTML: {Error}")
