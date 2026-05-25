@@ -1,3 +1,4 @@
-.idea
 .env
-BOT_DataBase.db
+schedule_bot.db
+__pycache__/
+.venv/

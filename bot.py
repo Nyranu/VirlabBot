@@ -15,11 +15,17 @@ from telebot import types
 load_dotenv()
 
 CACHE_TTL = 600
+DEBUG_PARSER = os.getenv("DEBUG_PARSER", "false").lower() == "true"
 
-if not os.getenv("Virlap-API-TOKEN"):
+BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("Virlap-API-TOKEN")
+DB_PATH = os.getenv("DB_PATH") or os.getenv("DB-PATH") or "schedule_bot.db"
+MAIN_SHEET_URL = os.getenv("MAIN_SHEET_URL") or os.getenv("main_gs")
+PRACTICE_SHEET_URL = os.getenv("PRACTICE_SHEET_URL") or os.getenv("PRACT_GS")
+
+if not BOT_TOKEN:
     raise RuntimeError("токена нема")
 
-bot = telebot.TeleBot(os.getenv("Virlap-API-TOKEN"))
+bot = telebot.TeleBot(BOT_TOKEN)
 
 registration_cache = {}
 schedule_cache = {
@@ -36,7 +42,7 @@ class SheetTable:
 
 
 def db_connection():
-    con = sqlite3.connect(os.getenv('DB-PATH'))
+    con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     return con
 
@@ -91,6 +97,11 @@ def save_user(telegram_id, full_name, group_name):
 def normalize(text):
     text = str(text).lower().replace("ё", "е")
     return re.sub(r"[^a-zа-я0-9]", "", text)
+
+
+def debug_log(message):
+    if DEBUG_PARSER:
+        print(f"[DEBUG_PARSER] {message}")
 
 
 def clean_text(text):
@@ -160,10 +171,9 @@ def load_schedule_tables(force=False):
 
     all_tables = []
 
-    for source, url in [
-        ("Основное расписание", os.getenv("main_gs")),
-        ("Практики", os.getenv("PRACT_GS"))
-    ]:
+    for source, url in [("Практики", PRACTICE_SHEET_URL), ("Основное расписание", MAIN_SHEET_URL)]:
+        if not url:
+            continue
         sid = spreadsheet_id(url)
         loaded_for_source = []
 
@@ -184,9 +194,11 @@ def load_schedule_tables(force=False):
                 pass
 
         all_tables.extend(loaded_for_source)
+        debug_log(f"{source}: загружено листов={len(loaded_for_source)}")
 
     schedule_cache["time"] = now
     schedule_cache["tables"] = all_tables
+    debug_log(f"Всего таблиц загружено: {len(all_tables)}")
 
     return all_tables
 
@@ -232,21 +244,35 @@ def row_text(df, row_index):
 
 
 def cell_has_group(cell, group):
-    cell_n = normalize(cell)
-    group_n = normalize(group)
+    return normalize_group(cell) == normalize_group(group) and normalize_group(group) != ""
 
-    if not group_n:
-        return False
 
-    return cell_n == group_n or group_n in cell_n
+def normalize_group(value: str) -> str:
+    text = str(value).upper().replace("Ё", "Е")
+    text = re.sub(r"\s+", "", text)
+    text = text.replace("—", "-").replace("–", "-")
+    # ИСП11-125П -> ИСП-11-125П
+    text = re.sub(r"^([А-ЯA-Z]{2,6})-?(\d{1,2})-?(\d{2,4}[А-ЯA-Z]?)$", r"\1-\2-\3", text)
+    return text
+
+
+def extract_group_tokens(text: str):
+    raw = str(text).upper().replace("Ё", "Е").replace("\n", " ")
+    raw = raw.replace("—", "-").replace("–", "-")
+    matches = re.findall(r"[А-ЯA-Z]{2,6}\s*-?\s*\d{1,2}\s*-?\s*\d{2,4}[А-ЯA-Z]?", raw)
+    return {normalize_group(m) for m in matches if normalize_group(m)}
 
 
 def find_group_columns(df, group):
     places = []
+    group_n = normalize_group(group)
+    if not group_n:
+        return places
 
     for r in range(len(df)):
         for c in range(len(df.columns)):
-            if cell_has_group(df.iat[r, c], group):
+            tokens = extract_group_tokens(df.iat[r, c])
+            if group_n in tokens:
                 places.append((r, c))
 
     return places
@@ -288,6 +314,7 @@ def collect_group_schedule(tables, group, day):
     for table in tables:
         df = table.df
         group_places = find_group_columns(df, group)
+        debug_log(f"{table.source} gid={table.gid}: найдено колонок группы={len(group_places)}")
 
         for header_row, group_col in group_places:
             current_day = None
@@ -312,6 +339,7 @@ def collect_group_schedule(tables, group, day):
                 if key not in seen:
                     seen.add(key)
                     found.append(line)
+    debug_log(f"Группа={group}, день={day}: строк найдено={len(found)}")
 
     return found
 
@@ -322,15 +350,15 @@ def find_schedule_for_group(group, day):
     main_tables = [t for t in tables if t.source == "Основное расписание"]
     practice_tables = [t for t in tables if t.source == "Практики"]
 
-    result = collect_group_schedule(main_tables, group, day)
-
-    if result:
-        return "Основное расписание", result
-
     result = collect_group_schedule(practice_tables, group, day)
 
     if result:
         return "Расписание практик", result
+
+    result = collect_group_schedule(main_tables, group, day)
+
+    if result:
+        return "Основное расписание", result
 
     return "", []
 
@@ -346,17 +374,32 @@ def find_teacher_lessons(teacher):
         current_day = None
 
         for r in range(len(df)):
-            text = row_text(df, r)
+            row_values = [clean_text(x) for x in df.iloc[r].tolist()]
+            text = " | ".join([x for x in row_values if x])
             detected = detect_day(text)
 
             if detected:
                 current_day = detected
 
-            if teacher_n and teacher_n in normalize(text):
+            for c, cell in enumerate(row_values):
+                cell_n = normalize(cell)
+                if not cell or not teacher_n or teacher_n not in cell_n:
+                    continue
+                if detect_day(cell):
+                    continue
+                # ищем группу сверху в этой же колонке
+                group_name = ""
+                for rr in range(r, -1, -1):
+                    tokens = extract_group_tokens(df.iat[rr, c])
+                    if tokens:
+                        group_name = sorted(tokens)[0]
+                        break
+                if not group_name:
+                    continue
+                left = " ".join([v for v in row_values[max(0, c - 3):c] if v and not detect_day(v)])
                 day_text = current_day if current_day else "день не указан"
-                line = f"{table.source}, {day_text}: {text}"
+                line = f"{table.source} | {day_text} | группа: {group_name} | {left}\n{cell}"
                 key = normalize(line)
-
                 if key not in seen:
                     seen.add(key)
                     result.append(line)
