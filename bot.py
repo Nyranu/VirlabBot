@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import datetime
+import time
 
 import telebot
 from dotenv import load_dotenv
@@ -116,6 +117,20 @@ def start(Message):
         Bot.send_message(Message.chat.id, "Привет! Для начала нужно зарегистрироваться.\nНапиши /reg")
 
 
+@Bot.message_handler(commands=["help"])
+def helpCommand(Message):
+    Bot.send_message(
+        Message.chat.id,
+        "/reg — регистрация\n"
+        "/day — расписание группы на день\n"
+        "/today — расписание на сегодня\n"
+        "/teacher — поиск занятий преподавателя\n"
+        "/profile — мой профиль\n"
+        "/refresh — обновить расписание\n"
+        "/help — помощь",
+    )
+
+
 @Bot.message_handler(commands=["reg"])
 def regStart(Message):
     Bot.send_message(Message.chat.id, "Введите ФИО:")
@@ -210,8 +225,11 @@ def teacherSearch(Message):
 
 @Bot.message_handler(commands=["refresh"])
 def refresh(Message):
-    Parser.loadScheduleTables(Force=True)
-    Bot.send_message(Message.chat.id, "Расписание обновлено.")
+    try:
+        Parser.loadScheduleTables(Force=True)
+        Bot.send_message(Message.chat.id, "Расписание обновлено.")
+    except Exception as Error:
+        Bot.send_message(Message.chat.id, f"Не удалось обновить расписание: {Error}")
 
 
 @Bot.message_handler(content_types=["text"])
@@ -238,21 +256,7 @@ if __name__ == "__main__":
     print("Бот запущен...")
     while True:
         try:
-            Bot.infinity_polling(skip_pending=True)
+            Bot.infinity_polling(skip_pending=False)
         except Exception as Error:
             print(f"Ошибка polling, повтор через 5 секунд: {Error}")
-            import time
             time.sleep(5)
-@Bot.message_handler(commands=["help"])
-def helpCommand(Message):
-    Bot.send_message(
-        Message.chat.id,
-        "/reg — регистрация\n"
-        "/day — расписание группы на день\n"
-        "/today — расписание на сегодня\n"
-        "/teacher — поиск занятий преподавателя\n"
-        "/profile — мой профиль\n"
-        "/refresh — обновить расписание\n"
-        "/help — помощь",
-    )
-

@@ -128,7 +128,8 @@ class ScheduleParser:
     def isHeaderLikeRow(self, DataFrame, RowIndex):
         TokensPerCell = [self.extractGroupTokens(DataFrame.iat[RowIndex, Col]) for Col in range(len(DataFrame.columns))]
         GroupCellCount = sum(1 for Tokens in TokensPerCell if Tokens)
-        return GroupCellCount >= 2
+        GroupTokenCount = sum(len(Tokens) for Tokens in TokensPerCell)
+        return GroupCellCount >= 2 or GroupTokenCount >= 2
 
     def findGroupHeaders(self, DataFrame, Group):
         GroupNormalized = self.normalizeGroup(Group)
