@@ -12,7 +12,7 @@ from scheduleParser import ScheduleParser
 
 load_dotenv()
 
-BotToken = os.getenv("BOT_TOKEN")
+BotToken = os.getenv("Virlap-API-TOKEN")
 DbPath = os.getenv("DB_PATH", "schedule_bot.db")
 
 if not BotToken:

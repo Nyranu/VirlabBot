@@ -38,8 +38,8 @@ class ScheduleParser:
     }
 
     def __init__(self, MainSheetUrl=None, PracticeSheetUrl=None, DebugParser=None, CacheTtl=600):
-        self.MainSheetUrl = MainSheetUrl or os.getenv("MAIN_SHEET_URL")
-        self.PracticeSheetUrl = PracticeSheetUrl or os.getenv("PRACTICE_SHEET_URL")
+        self.MainSheetUrl = MainSheetUrl or os.getenv("MAIN_GS")
+        self.PracticeSheetUrl = PracticeSheetUrl or os.getenv("PRACT_GS")
         self.DebugParser = (DebugParser if DebugParser is not None else os.getenv("DEBUG_PARSER", "false").lower() == "true")
         self.CacheTtl = CacheTtl
         self.ScheduleCache = {"Time": 0, "Tables": []}
@@ -150,7 +150,7 @@ class ScheduleParser:
             return self.ScheduleCache["Tables"]
 
         if not self.MainSheetUrl and not self.PracticeSheetUrl:
-            raise RuntimeError("Не заданы MAIN_SHEET_URL и PRACTICE_SHEET_URL в .env")
+            raise RuntimeError("Не заданы MAIN_GS и PRACTICE_SHEET_URL в .env")
 
         AllTables = []
         for Source, Url in [("Практики", self.PracticeSheetUrl), ("Основное расписание", self.MainSheetUrl)]:
