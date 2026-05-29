@@ -1,7 +1,10 @@
+import html
+import json
 import os
 import re
 import time
 from dataclasses import dataclass
+from datetime import date
 from io import StringIO
 
 import pandas as pd
@@ -16,7 +19,10 @@ load_dotenv()
 class SheetTable:
     Source: str
     Gid: str
+    SheetName: str
     DataFrame: pd.DataFrame
+    StartDate: date | None = None
+    EndDate: date | None = None
 
 
 class ScheduleParser:
@@ -65,17 +71,118 @@ class ScheduleParser:
         Found = re.search(r"/spreadsheets/d/([^/]+)", Url or "")
         return Found.group(1) if Found else ""
 
-    def getGids(self, Url):
-        Gids = set(re.findall(r"gid=(\d+)", Url or ""))
+    def decodeSheetName(self, SheetName):
+        Text = html.unescape(str(SheetName))
+        try:
+            Text = json.loads(f'"{Text}"')
+        except Exception:
+            pass
+        return self.cleanText(Text)
+
+    def addSheetInfo(self, SheetInfos, SeenGids, Gid, SheetName=None):
+        Gid = str(Gid)
+        if not Gid or Gid in SeenGids:
+            return
+        SheetName = self.decodeSheetName(SheetName or Gid) or Gid
+        SheetInfos.append({"Gid": Gid, "SheetName": SheetName})
+        SeenGids.add(Gid)
+
+    def getSheetInfos(self, Url):
+        SheetInfos = []
+        SeenGids = set()
+
+        UrlGids = re.findall(r"gid=(\d+)", Url or "")
+
         try:
             Page = requests.get(Url, timeout=20).text
-            Gids.update(re.findall(r"gid=(\d+)", Page))
-            Gids.update(re.findall(r'"gid":(\d+)', Page))
         except Exception as Error:
-            self.debugLog(f"Не удалось получить gid по URL: {Error}")
-        if not Gids:
-            Gids.add("0")
-        return sorted(Gids)
+            self.debugLog(f"Не удалось получить сведения о листах по URL: {Error}")
+            Page = ""
+
+        if Page:
+            LinkPattern = re.compile(r'<a[^>]+href=["\'][^"\']*gid=(\d+)[^"\']*["\'][^>]*>(.*?)</a>', re.S)
+            for Gid, NameHtml in LinkPattern.findall(Page):
+                Name = re.sub(r"<[^>]+>", " ", NameHtml)
+                self.addSheetInfo(SheetInfos, SeenGids, Gid, Name)
+
+            Patterns = [
+                (re.compile(r'"(?:gid|sheetId)"\s*:?\s*"?(\d+)"?.{0,200}?"(?:name|title)"\s*:?\s*"((?:\\.|[^"\\])*)"', re.S), True),
+                (re.compile(r'"(?:name|title)"\s*:?\s*"((?:\\.|[^"\\])*)".{0,200}?"(?:gid|sheetId)"\s*:?\s*"?(\d+)"?', re.S), False),
+            ]
+            for Pattern, GidFirst in Patterns:
+                for First, Second in Pattern.findall(Page):
+                    if GidFirst:
+                        Gid, SheetName = First, Second
+                    else:
+                        SheetName, Gid = First, Second
+                    self.addSheetInfo(SheetInfos, SeenGids, Gid, SheetName)
+
+            for Gid in re.findall(r"gid=(\d+)", Page):
+                self.addSheetInfo(SheetInfos, SeenGids, Gid)
+            for Gid in re.findall(r'"(?:gid|sheetId)"\s*:?\s*"?(\d+)"?', Page):
+                self.addSheetInfo(SheetInfos, SeenGids, Gid)
+
+        for Gid in UrlGids:
+            self.addSheetInfo(SheetInfos, SeenGids, Gid)
+        if not SheetInfos:
+            self.addSheetInfo(SheetInfos, SeenGids, "0")
+        return SheetInfos
+
+    def getGids(self, Url):
+        return [Info["Gid"] for Info in self.getSheetInfos(Url)]
+
+    def parseSheetDateRange(self, SheetName):
+        Text = str(SheetName or "").lower().replace("ё", "е")
+        DatePattern = r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?"
+        Matches = list(re.finditer(DatePattern, Text))
+        if not Matches:
+            return None, None
+
+        def buildDate(Match, FallbackYear=None):
+            Day = int(Match.group(1))
+            Month = int(Match.group(2))
+            YearText = Match.group(3)
+            Year = int(YearText) if YearText else (FallbackYear or date.today().year)
+            if Year < 100:
+                Year += 2000
+            return date(Year, Month, Day)
+
+        try:
+            StartDate = buildDate(Matches[0])
+            EndDate = buildDate(Matches[1], StartDate.year) if len(Matches) > 1 else StartDate
+            if len(Matches) > 1 and EndDate < StartDate and not Matches[1].group(3):
+                EndDate = date(StartDate.year + 1, EndDate.month, EndDate.day)
+            return StartDate, EndDate
+        except ValueError as Error:
+            self.debugLog(f"Не удалось распознать дату листа {SheetName}: {Error}")
+            return None, None
+
+    def filterTablesByDate(self, Tables, TargetDate):
+        TargetDate = TargetDate or date.today()
+        self.debugLog(f"TargetDate: {TargetDate}")
+        Matched = []
+        Undated = []
+        DatedCount = 0
+
+        for Table in Tables:
+            if Table.StartDate and Table.EndDate:
+                DatedCount += 1
+                if Table.StartDate <= TargetDate <= Table.EndDate:
+                    self.debugLog(f"лист подошёл по дате: {Table.Source} gid={Table.Gid} sheet={Table.SheetName} date={Table.StartDate}-{Table.EndDate}")
+                    Matched.append(Table)
+                else:
+                    self.debugLog(f"лист пропущен по дате: {Table.Source} gid={Table.Gid} sheet={Table.SheetName} date={Table.StartDate}-{Table.EndDate}")
+            else:
+                Undated.append(Table)
+
+        if Matched:
+            return Matched
+        if DatedCount:
+            self.debugLog(f"Точный лист по дате {TargetDate} не найден, fallback на листы без даты: {len(Undated)}")
+            return Undated
+
+        self.debugLog(f"Датированные листы не найдены, fallback на все листы: {len(Tables)}")
+        return list(Tables)
 
     def readGoogleCsv(self, SheetId, Gid):
         CsvUrl = f"https://docs.google.com/spreadsheets/d/{SheetId}/gviz/tq?tqx=out:csv&gid={Gid}"
@@ -93,7 +200,10 @@ class ScheduleParser:
         for Index, Table in enumerate(Tables):
             DataFrame = self.cleanDf(Table)
             if not DataFrame.empty:
-                Result.append(SheetTable(Source, str(Index), DataFrame))
+                SheetName = str(Index)
+                StartDate, EndDate = self.parseSheetDateRange(SheetName)
+                Result.append(SheetTable(Source, str(Index), SheetName, DataFrame, StartDate, EndDate))
+                self.debugLog(f"загружен лист: {Source}, gid={Index}, SheetName={SheetName}, StartDate={StartDate}, EndDate={EndDate}")
         return Result
 
     def normalizeGroup(self, Value):
@@ -158,14 +268,17 @@ class ScheduleParser:
                 continue
             SheetId = self.spreadsheetId(Url)
             Loaded = []
-            for Gid in self.getGids(Url):
+            for SheetInfo in self.getSheetInfos(Url):
+                Gid = SheetInfo["Gid"]
+                SheetName = SheetInfo["SheetName"]
+                StartDate, EndDate = self.parseSheetDateRange(SheetName)
                 try:
                     DataFrame = self.readGoogleCsv(SheetId, Gid)
                     if not DataFrame.empty:
-                        Loaded.append(SheetTable(Source, Gid, DataFrame))
-                        self.debugLog(f"{Source}: загружен gid={Gid}")
+                        Loaded.append(SheetTable(Source, Gid, SheetName, DataFrame, StartDate, EndDate))
+                        self.debugLog(f"загружен лист: {Source}, gid={Gid}, SheetName={SheetName}, StartDate={StartDate}, EndDate={EndDate}")
                 except Exception as Error:
-                    self.debugLog(f"{Source}: ошибка CSV gid={Gid}: {Error}")
+                    self.debugLog(f"{Source}: ошибка CSV gid={Gid} sheet={SheetName}: {Error}")
             if not Loaded:
                 try:
                     for Table in self.readGoogleHtml(Url, Source):
@@ -199,7 +312,7 @@ class ScheduleParser:
         for Table in Tables:
             DataFrame = Table.DataFrame
             Headers = self.findGroupHeaders(DataFrame, Group)
-            self.debugLog(f"{Table.Source} gid={Table.Gid}: заголовков группы={len(Headers)}")
+            self.debugLog(f"{Table.Source} gid={Table.Gid} sheet={Table.SheetName}: заголовков группы={len(Headers)}")
             for HeaderRow, GroupCol in Headers:
                 CurrentDay = None
                 for RowIndex in range(HeaderRow + 1, len(DataFrame)):
@@ -225,10 +338,11 @@ class ScheduleParser:
         self.debugLog(f"Группа={Group} день={Day}: найдено={len(Found)} дублей_удалено={DedupRemoved}")
         return Found
 
-    def findScheduleForGroup(self, Group, Day):
+    def findScheduleForGroup(self, Group, Day, TargetDate=None):
+        TargetDate = TargetDate or date.today()
         Tables = self.loadScheduleTables()
-        PracticeTables = [Table for Table in Tables if Table.Source == "Практики"]
-        MainTables = [Table for Table in Tables if Table.Source == "Основное расписание"]
+        PracticeTables = self.filterTablesByDate([Table for Table in Tables if Table.Source == "Практики"], TargetDate)
+        MainTables = self.filterTablesByDate([Table for Table in Tables if Table.Source == "Основное расписание"], TargetDate)
 
         PracticeLessons = self.collectGroupSchedule(PracticeTables, Group, Day)
         if PracticeLessons:
@@ -250,9 +364,10 @@ class ScheduleParser:
                     break
         return Found
 
-    def findTeacherLessons(self, TeacherName):
+    def findTeacherLessons(self, TeacherName, TargetDate=None):
+        TargetDate = TargetDate or date.today()
         TeacherNormalized = self.normalize(TeacherName)
-        Tables = self.loadScheduleTables()
+        Tables = self.filterTablesByDate(self.loadScheduleTables(), TargetDate)
         Result = []
         Seen = set()
         DedupRemoved = 0

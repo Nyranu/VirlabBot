@@ -96,8 +96,15 @@ def sendLong(ChatId, Text):
         Bot.send_message(ChatId, Text[Index:Index + 3900])
 
 
-def showSchedule(ChatId, GroupName, Day):
-    Source, Lessons = Parser.findScheduleForGroup(GroupName, Day)
+def getDateForWeekday(Day):
+    Days = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+    Today = datetime.date.today()
+    Monday = Today - datetime.timedelta(days=Today.weekday())
+    return Monday + datetime.timedelta(days=Days.index(Day))
+
+
+def showSchedule(ChatId, GroupName, Day, TargetDate=None):
+    Source, Lessons = Parser.findScheduleForGroup(GroupName, Day, TargetDate)
     if not Lessons:
         Bot.send_message(ChatId, f"Расписание для группы {GroupName} на {Day} не найдено.")
         return
@@ -185,9 +192,10 @@ def todaySchedule(Message):
     if not User:
         Bot.send_message(Message.chat.id, "Сначала нужно зарегистрироваться. Напиши /reg")
         return
+    TargetDate = datetime.date.today()
     Days = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-    Day = Days[datetime.datetime.now().weekday()]
-    showSchedule(Message.chat.id, User["group_name"], Day)
+    Day = Days[TargetDate.weekday()]
+    showSchedule(Message.chat.id, User["group_name"], Day, TargetDate)
 
 
 @Bot.callback_query_handler(func=lambda Call: Call.data.startswith("day:"))
@@ -198,8 +206,9 @@ def dayCallback(Call):
         Bot.send_message(Call.message.chat.id, "Напиши /reg")
         return
     Day = Call.data.split(":", 1)[1]
+    TargetDate = getDateForWeekday(Day)
     Bot.answer_callback_query(Call.id, "Ищу расписание...")
-    showSchedule(Call.message.chat.id, User["group_name"], Day)
+    showSchedule(Call.message.chat.id, User["group_name"], Day, TargetDate)
 
 
 @Bot.message_handler(commands=["teacher"])
@@ -213,7 +222,7 @@ def teacherSearch(Message):
     if not Teacher or Teacher.startswith("/"):
         Bot.send_message(Message.chat.id, "Имя преподавателя введено некорректно. Напиши /teacher заново.")
         return
-    Lessons = Parser.findTeacherLessons(Teacher)
+    Lessons = Parser.findTeacherLessons(Teacher, datetime.date.today())
     if not Lessons:
         Bot.send_message(Message.chat.id, f"Занятия преподавателя «{Teacher}» на этой неделе не найдены.")
         return
