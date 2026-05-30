@@ -323,6 +323,22 @@ class ScheduleParser:
                     Headers.append((RowIndex, ColIndex))
         return Headers
 
+    def hasGroupInTables(self, Tables, Group):
+        GroupNormalized = self.normalizeGroup(Group)
+        if not GroupNormalized:
+            return False
+
+        for Table in Tables:
+            Headers = self.findGroupHeaders(Table.DataFrame, Group)
+            if Headers:
+                self.debugLog(
+                    f"группа {GroupNormalized} найдена как заголовок в {Table.Source} "
+                    f"gid={Table.Gid} sheet={Table.SheetName}"
+                )
+                return True
+
+        return False
+
     def loadScheduleTables(self, Force=False):
         Now = time.time()
         if not Force and self.ScheduleCache["Tables"] and Now - self.ScheduleCache["Time"] < self.CacheTtl:
@@ -417,9 +433,12 @@ class ScheduleParser:
         PracticeTables = self.filterTablesByDate([Table for Table in Tables if Table.Source == "Практики"], TargetDate)
         MainTables = self.filterTablesByDate([Table for Table in Tables if Table.Source == "Основное расписание"], TargetDate)
 
+        PracticeGroupExists = self.hasGroupInTables(PracticeTables, Group)
         PracticeLessons = self.collectGroupSchedule(PracticeTables, Group, Day)
         if PracticeLessons:
             return "Расписание практик", PracticeLessons
+        if PracticeGroupExists:
+            return "Расписание практик", []
 
         MainLessons = self.collectGroupSchedule(MainTables, Group, Day)
         if MainLessons:

@@ -106,7 +106,10 @@ def getDateForWeekday(Day):
 def showSchedule(ChatId, GroupName, Day, TargetDate=None):
     Source, Lessons = Parser.findScheduleForGroup(GroupName, Day, TargetDate)
     if not Lessons:
-        Bot.send_message(ChatId, f"Расписание для группы {GroupName} на {Day} не найдено.")
+        if Source == "Расписание практик":
+            Bot.send_message(ChatId, f"Расписание практик для группы {GroupName} на {Day} не найдено.")
+        else:
+            Bot.send_message(ChatId, f"Расписание для группы {GroupName} на {Day} не найдено.")
         return
 
     Text = f"Расписание группы {GroupName} на {Day}\nИсточник: {Source}\n\n"

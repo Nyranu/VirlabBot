@@ -30,6 +30,14 @@ def runParserTests():
     for Table in Tables:
         print(f"{Table.Source} | {Table.Gid} | {Table.SheetName} | {Table.StartDate} | {Table.EndDate}")
 
+    Days = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+    TodayDay = Days[Today.weekday()]
+
+    Source, Lessons = Parser.findScheduleForGroup("ИСП11-125П", TodayDay, Today)
+    print(f"\nИСП11-125П | сегодня {TodayDay} | {Today} | {Source or 'не найден'} | {len(Lessons)}")
+    for Number, Lesson in enumerate(Lessons, 1):
+        print(f"{Number}. {Lesson}")
+
     Source, Lessons = Parser.findScheduleForGroup("ИСП11-125П", "пятница", Today)
     print(f"\nИСП11-125П | пятница | {Today} | {Source or 'не найден'} | {len(Lessons)}")
     for Number, Lesson in enumerate(Lessons, 1):
