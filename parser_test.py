@@ -6,6 +6,19 @@ from scheduleParser import ScheduleParser
 def runParserTests():
     Parser = ScheduleParser()
     Today = date.today()
+
+    TestValues = [
+        "26.05-31.05",
+        "26.05 - 31.05",
+        "26.05–31.05",
+        "26.05.2026-31.05.2026",
+        "10.10-11.40",
+        "9.45-10.30",
+        "10.35-11.20",
+    ]
+    for Value in TestValues:
+        print(Value, "=>", Parser.parseSheetDateRange(Value))
+
     try:
         Tables = Parser.loadScheduleTables(Force=True)
     except Exception as Error:

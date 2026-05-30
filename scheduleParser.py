@@ -4,7 +4,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from io import StringIO
 
 import pandas as pd
@@ -128,31 +128,69 @@ class ScheduleParser:
             self.addSheetInfo(SheetInfos, SeenGids, "0")
         return SheetInfos
 
+    def buildDateFromParts(self, DayText, MonthText, YearText=None, FallbackYear=None):
+        Day = int(DayText)
+        Month = int(MonthText)
+        Year = int(YearText) if YearText else (FallbackYear or date.today().year)
+        if Year < 100:
+            Year += 2000
+        return date(Year, Month, Day)
+
+    def findDateMatches(self, Text):
+        Text = str(Text or "").lower().replace("ё", "е")
+        DateToken = r"(?<!\d)(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?(?!\.\d)"
+        RangePattern = re.compile(rf"{DateToken}\s*[-–—]\s*{DateToken}")
+        DatePattern = re.compile(DateToken)
+        Matches = []
+        RangeSpans = []
+        InvalidRangeSpans = []
+
+        for Match in RangePattern.finditer(Text):
+            try:
+                StartDate = self.buildDateFromParts(Match.group(1), Match.group(2), Match.group(3))
+                EndDate = self.buildDateFromParts(Match.group(4), Match.group(5), Match.group(6), StartDate.year)
+                if EndDate < StartDate and not Match.group(6):
+                    EndDate = date(StartDate.year + 1, EndDate.month, EndDate.day)
+            except ValueError:
+                InvalidRangeSpans.append(Match.span())
+                continue
+
+            RangeSpans.append(Match.span())
+            Matches.append({"start": StartDate, "end": EndDate, "is_range": True, "position": Match.start()})
+
+        def isInsideSpan(Position, Spans):
+            return any(Start <= Position < End for Start, End in Spans)
+
+        for Match in DatePattern.finditer(Text):
+            if isInsideSpan(Match.start(), RangeSpans) or isInsideSpan(Match.start(), InvalidRangeSpans):
+                continue
+
+            Before = Text[max(0, Match.start() - 10):Match.start()]
+            After = Text[Match.end():Match.end() + 10]
+            if re.match(r"\s*[-–—]\s*\d{1,2}\.\d{1,2}", After):
+                continue
+            if re.search(r"\d{1,2}\.\d{1,2}\s*[-–—]\s*$", Before):
+                continue
+
+            try:
+                FoundDate = self.buildDateFromParts(Match.group(1), Match.group(2), Match.group(3))
+            except ValueError:
+                continue
+            Matches.append({"start": FoundDate, "end": FoundDate, "is_range": False, "position": Match.start()})
+
+        return sorted(Matches, key=lambda Item: Item["position"])
+
     def parseSheetDateRange(self, SheetName):
-        Text = str(SheetName or "").lower().replace("ё", "е")
-        DatePattern = r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?"
-        Matches = list(re.finditer(DatePattern, Text))
+        Matches = self.findDateMatches(SheetName)
         if not Matches:
             return None, None
 
-        def buildDate(Match, FallbackYear=None):
-            Day = int(Match.group(1))
-            Month = int(Match.group(2))
-            YearText = Match.group(3)
-            Year = int(YearText) if YearText else (FallbackYear or date.today().year)
-            if Year < 100:
-                Year += 2000
-            return date(Year, Month, Day)
+        for Match in Matches:
+            if Match["is_range"]:
+                return Match["start"], Match["end"]
 
-        try:
-            StartDate = buildDate(Matches[0])
-            EndDate = buildDate(Matches[1], StartDate.year) if len(Matches) > 1 else StartDate
-            if len(Matches) > 1 and EndDate < StartDate and not Matches[1].group(3):
-                EndDate = date(StartDate.year + 1, EndDate.month, EndDate.day)
-            return StartDate, EndDate
-        except ValueError as Error:
-            self.debugLog(f"Не удалось распознать дату листа {SheetName}: {Error}")
-            return None, None
+        FirstDate = Matches[0]["start"]
+        return FirstDate, FirstDate
 
     def parseTableDateRange(self, DataFrame):
         Parts = []
@@ -165,36 +203,18 @@ class ScheduleParser:
                 if Value:
                     Parts.append(Value)
 
-        Text = " ".join(Parts)
-        StartDate, EndDate = self.parseSheetDateRange(Text)
-        DatePattern = r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?"
-        Matches = list(re.finditer(DatePattern, Text))
-        if len(Matches) <= 1:
-            return StartDate, EndDate
-
-        Dates = []
-        FallbackYear = date.today().year
-        PreviousDate = None
-        for Match in Matches:
-            try:
-                Day = int(Match.group(1))
-                Month = int(Match.group(2))
-                YearText = Match.group(3)
-                Year = int(YearText) if YearText else FallbackYear
-                if Year < 100:
-                    Year += 2000
-                ParsedDate = date(Year, Month, Day)
-                if PreviousDate and ParsedDate < PreviousDate and not YearText:
-                    ParsedDate = date(PreviousDate.year + 1, ParsedDate.month, ParsedDate.day)
-                Dates.append(ParsedDate)
-                PreviousDate = ParsedDate
-                FallbackYear = ParsedDate.year
-            except ValueError:
-                continue
-
-        if not Dates:
+        Matches = self.findDateMatches(" ".join(Parts))
+        if not Matches:
             return None, None
-        return min(Dates), max(Dates)
+
+        for Match in Matches:
+            if Match["is_range"]:
+                return Match["start"], Match["end"]
+
+        FirstDate = Matches[0]["start"]
+        WeekStart = FirstDate - timedelta(days=FirstDate.weekday())
+        WeekEnd = WeekStart + timedelta(days=6)
+        return WeekStart, WeekEnd
 
     def filterTablesByDate(self, Tables, TargetDate):
         Tables = list(Tables or [])
