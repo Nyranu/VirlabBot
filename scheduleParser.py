@@ -154,7 +154,50 @@ class ScheduleParser:
             self.debugLog(f"Не удалось распознать дату листа {SheetName}: {Error}")
             return None, None
 
+    def parseTableDateRange(self, DataFrame):
+        Parts = []
+        if DataFrame is None or DataFrame.empty:
+            return None, None
+
+        for RowIndex in range(min(15, len(DataFrame))):
+            for ColIndex in range(len(DataFrame.columns)):
+                Value = self.cleanText(DataFrame.iat[RowIndex, ColIndex])
+                if Value:
+                    Parts.append(Value)
+
+        Text = " ".join(Parts)
+        StartDate, EndDate = self.parseSheetDateRange(Text)
+        DatePattern = r"(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?"
+        Matches = list(re.finditer(DatePattern, Text))
+        if len(Matches) <= 1:
+            return StartDate, EndDate
+
+        Dates = []
+        FallbackYear = date.today().year
+        PreviousDate = None
+        for Match in Matches:
+            try:
+                Day = int(Match.group(1))
+                Month = int(Match.group(2))
+                YearText = Match.group(3)
+                Year = int(YearText) if YearText else FallbackYear
+                if Year < 100:
+                    Year += 2000
+                ParsedDate = date(Year, Month, Day)
+                if PreviousDate and ParsedDate < PreviousDate and not YearText:
+                    ParsedDate = date(PreviousDate.year + 1, ParsedDate.month, ParsedDate.day)
+                Dates.append(ParsedDate)
+                PreviousDate = ParsedDate
+                FallbackYear = ParsedDate.year
+            except ValueError:
+                continue
+
+        if not Dates:
+            return None, None
+        return min(Dates), max(Dates)
+
     def filterTablesByDate(self, Tables, TargetDate):
+        Tables = list(Tables or [])
         TargetDate = TargetDate or date.today()
         self.debugLog(f"TargetDate: {TargetDate}")
         Matched = []
@@ -172,14 +215,19 @@ class ScheduleParser:
             else:
                 Undated.append(Table)
 
+        if not Tables:
+            return []
         if Matched:
             return Matched
         if DatedCount:
             self.debugLog(f"Точный лист по дате {TargetDate} не найден, fallback на листы без даты: {len(Undated)}")
             return Undated
 
-        self.debugLog(f"Датированные листы не найдены, fallback на все листы: {len(Tables)}")
-        return list(Tables)
+        self.debugLog(
+            f"Датированные листы не найдены, fallback на последний лист источника: "
+            f"{Tables[-1].Source} gid={Tables[-1].Gid} sheet={Tables[-1].SheetName}"
+        )
+        return [Tables[-1]]
 
     def readGoogleCsv(self, SheetId, Gid):
         CsvUrl = f"https://docs.google.com/spreadsheets/d/{SheetId}/gviz/tq?tqx=out:csv&gid={Gid}"
@@ -199,6 +247,10 @@ class ScheduleParser:
             if not DataFrame.empty:
                 SheetName = str(Index)
                 StartDate, EndDate = self.parseSheetDateRange(SheetName)
+                self.debugLog(f"дата из названия листа: {Source}, gid={Index}, SheetName={SheetName}, StartDate={StartDate}, EndDate={EndDate}")
+                if not StartDate or not EndDate:
+                    StartDate, EndDate = self.parseTableDateRange(DataFrame)
+                    self.debugLog(f"дата из содержимого таблицы: {Source}, gid={Index}, SheetName={SheetName}, StartDate={StartDate}, EndDate={EndDate}")
                 Result.append(SheetTable(Source, str(Index), SheetName, DataFrame, StartDate, EndDate))
                 self.debugLog(f"загружен лист: {Source}, gid={Index}, SheetName={SheetName}, StartDate={StartDate}, EndDate={EndDate}")
         return Result
@@ -269,8 +321,12 @@ class ScheduleParser:
                 Gid = SheetInfo["Gid"]
                 SheetName = SheetInfo["SheetName"]
                 StartDate, EndDate = self.parseSheetDateRange(SheetName)
+                self.debugLog(f"дата из названия листа: {Source}, gid={Gid}, SheetName={SheetName}, StartDate={StartDate}, EndDate={EndDate}")
                 try:
                     DataFrame = self.readGoogleCsv(SheetId, Gid)
+                    if not StartDate or not EndDate:
+                        StartDate, EndDate = self.parseTableDateRange(DataFrame)
+                        self.debugLog(f"дата из содержимого таблицы: {Source}, gid={Gid}, SheetName={SheetName}, StartDate={StartDate}, EndDate={EndDate}")
                     if not DataFrame.empty:
                         Loaded.append(SheetTable(Source, Gid, SheetName, DataFrame, StartDate, EndDate))
                         self.debugLog(f"загружен лист: {Source}, gid={Gid}, SheetName={SheetName}, StartDate={StartDate}, EndDate={EndDate}")
