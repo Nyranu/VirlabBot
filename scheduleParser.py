@@ -364,7 +364,10 @@ class ScheduleParser:
     def findTeacherLessons(self, TeacherName, TargetDate=None):
         TargetDate = TargetDate or date.today()
         TeacherNormalized = self.normalize(TeacherName)
-        Tables = self.filterTablesByDate(self.loadScheduleTables(), TargetDate)
+        AllTables = self.loadScheduleTables()
+        PracticeTables = self.filterTablesByDate([Table for Table in AllTables if Table.Source == "Практики"], TargetDate)
+        MainTables = self.filterTablesByDate([Table for Table in AllTables if Table.Source == "Основное расписание"], TargetDate)
+        Tables = PracticeTables + MainTables
         Result = []
         Seen = set()
         DedupRemoved = 0
