@@ -329,16 +329,14 @@ class ScheduleParser:
             return False
 
         for Table in Tables:
-            DataFrame = Table.DataFrame
-            for RowIndex in range(len(DataFrame)):
-                for ColIndex in range(len(DataFrame.columns)):
-                    Tokens = self.extractGroupTokens(DataFrame.iat[RowIndex, ColIndex])
-                    if GroupNormalized in Tokens:
-                        self.debugLog(
-                            f"группа {GroupNormalized} найдена в {Table.Source} "
-                            f"gid={Table.Gid} sheet={Table.SheetName}"
-                        )
-                        return True
+            Headers = self.findGroupHeaders(Table.DataFrame, Group)
+            if Headers:
+                self.debugLog(
+                    f"группа {GroupNormalized} найдена как заголовок в {Table.Source} "
+                    f"gid={Table.Gid} sheet={Table.SheetName}"
+                )
+                return True
+
         return False
 
     def loadScheduleTables(self, Force=False):
