@@ -1,11 +1,70 @@
 from datetime import date, timedelta
 
-from scheduleParser import ScheduleParser
+from scheduleParser import ScheduleParser, SheetTable
+
+
+class SyntheticILoc:
+    def __init__(self, DataFrame):
+        self.DataFrame = DataFrame
+
+    def __getitem__(self, RowIndex):
+        return type("SyntheticRow", (), {"tolist": lambda _Self: self.DataFrame.Rows[RowIndex][:]})()
+
+
+class SyntheticIAt:
+    def __init__(self, DataFrame):
+        self.DataFrame = DataFrame
+
+    def __getitem__(self, Position):
+        RowIndex, ColIndex = Position
+        return self.DataFrame.Rows[RowIndex][ColIndex]
+
+
+class SyntheticDataFrame:
+    def __init__(self, Rows):
+        ColumnCount = max(len(Row) for Row in Rows)
+        self.Rows = [Row + [""] * (ColumnCount - len(Row)) for Row in Rows]
+        self.columns = list(range(ColumnCount))
+        self.iloc = SyntheticILoc(self)
+        self.iat = SyntheticIAt(self)
+
+    def __len__(self):
+        return len(self.Rows)
+
+
+def runSyntheticPracticeTests(Parser):
+    TargetDate = date(2026, 5, 30)
+
+    WeekRangeDataFrame = SyntheticDataFrame([
+        ["26.05-31.05"],
+        ["ИСП11-125П"],
+        ["понедельник"],
+        ["занятие понедельника"],
+        ["суббота"],
+        ["учебная практика"],
+    ])
+    WeekRangeTable = SheetTable("Практики", "synthetic-week", "synthetic-week", WeekRangeDataFrame)
+    GroupExists, Lessons = Parser.collectPracticeSchedule([WeekRangeTable], "ИСП11-125П", "суббота", TargetDate)
+    if not GroupExists or Lessons != ["учебная практика"]:
+        raise AssertionError(f"Недельный диапазон смешал дни: GroupExists={GroupExists}, Lessons={Lessons}")
+
+    ExactDateDataFrame = SyntheticDataFrame([
+        ["ИСП11-125П"],
+        ["30.05 учебная практика"],
+    ])
+    ExactDateTable = SheetTable("Практики", "synthetic-date", "synthetic-date", ExactDateDataFrame)
+    GroupExists, Lessons = Parser.collectPracticeSchedule([ExactDateTable], "ИСП11-125П", "суббота", TargetDate)
+    if not GroupExists or Lessons != ["30.05 учебная практика"]:
+        raise AssertionError(f"Точная дата занятия не найдена: GroupExists={GroupExists}, Lessons={Lessons}")
+
+    print("Synthetic practice tests: OK")
 
 
 def runParserTests():
     Parser = ScheduleParser()
     Today = date.today()
+
+    runSyntheticPracticeTests(Parser)
 
     TestValues = [
         "26.05-31.05",

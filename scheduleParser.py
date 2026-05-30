@@ -412,6 +412,21 @@ class ScheduleParser:
             return False
         return any(self.rowDateMatches(Text, TargetDate))
 
+    def rowHasExactTargetDate(self, Text, TargetDate):
+        if not TargetDate:
+            return False
+
+        for Match in self.findDateMatches(Text):
+            if Match["is_range"]:
+                if Match["start"] == Match["end"] and Match["start"] == TargetDate:
+                    return True
+                continue
+
+            if Match["start"] == TargetDate:
+                return True
+
+        return False
+
     def stripGroupTokens(self, Text, Group=None):
         Result = str(Text or "")
         Result = re.sub(r"[А-ЯA-Z]{2,6}\s*-?\s*\d{1,2}\s*-?\s*\d{2,4}[А-ЯA-Z]?", " ", Result, flags=re.I)
@@ -474,21 +489,21 @@ class ScheduleParser:
                 ]
                 HeaderLikeGroupRow = self.isHeaderLikeRow(DataFrame, GroupRow)
                 CurrentDay = None
-                CurrentDateMatches = False
+                CurrentExactDateMatches = False
                 for ContextRow in range(max(0, GroupRow - 5), GroupRow + 1):
                     ContextText = self.rowText(DataFrame, ContextRow)
                     ContextDay = self.detectDay(ContextText)
                     if ContextDay:
                         CurrentDay = ContextDay
                     if self.rowHasAnyDate(ContextText):
-                        CurrentDateMatches = self.rowHasTargetDate(ContextText, TargetDate)
+                        CurrentExactDateMatches = self.rowHasExactTargetDate(ContextText, TargetDate)
 
                 for RowIndex in range(GroupRow, len(DataFrame)):
                     RowText = self.rowText(DataFrame, RowIndex)
                     Tokens = self.extractGroupTokens(RowText)
                     HasCurrentGroup = GroupNormalized in Tokens
                     HasOtherGroup = bool(Tokens and GroupNormalized not in Tokens)
-                    RowOwnDateMatches = self.rowHasTargetDate(RowText, TargetDate)
+                    RowOwnExactDateMatches = self.rowHasExactTargetDate(RowText, TargetDate)
                     DetectedDay = self.detectDay(RowText)
 
                     if RowIndex > GroupRow:
@@ -500,9 +515,9 @@ class ScheduleParser:
                     if DetectedDay:
                         CurrentDay = DetectedDay
                     if self.rowHasAnyDate(RowText):
-                        CurrentDateMatches = RowOwnDateMatches
+                        CurrentExactDateMatches = RowOwnExactDateMatches
 
-                    RowMatchesDate = RowOwnDateMatches or CurrentDateMatches
+                    RowMatchesDate = RowOwnExactDateMatches or CurrentExactDateMatches
                     RowMatchesDay = DetectedDay == Day or (CurrentDay == Day and not DetectedDay)
                     if not RowMatchesDay and not RowMatchesDate:
                         continue
