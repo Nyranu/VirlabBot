@@ -57,6 +57,39 @@ def runSyntheticPracticeTests(Parser):
     if not GroupExists or Lessons != ["30.05 учебная практика"]:
         raise AssertionError(f"Точная дата занятия не найдена: GroupExists={GroupExists}, Lessons={Lessons}")
 
+    PracticeBoundaryDataFrame = SyntheticDataFrame([
+        ["ИСП11-125П", "Дата", "Время", "Наименование модуля", "Преподаватель", "Лаборатория"],
+        ["пт", "29.05.26", "8:30-13:15", "ПМ.04", "Ефименко А.М.", "220"],
+        ["сб", "30.05.26", "8:30-13:15", "ПМ.04", "Ефименко А.М.", "220"],
+        ["Время", "Наименование модуля", "Преподаватель"],
+        ["пт", "22.05.26", "8:30-13:15", "ПМ.04", "Давыдова Л.Б.", "228"],
+        ["сб", "23.05.26", "8:30-13:15", "ПМ.04", "Давыдова Л.Б.", "228"],
+        ["сб", "30.05.26", "13:30-18:15", "ПМ.04", "Давыдова Л.Б.", "228"],
+    ])
+    PracticeBoundaryTable = SheetTable("Практики", "synthetic-boundary", "synthetic-boundary", PracticeBoundaryDataFrame)
+
+    GroupExists, SaturdayLessons = Parser.collectPracticeSchedule([PracticeBoundaryTable], "ИСП11-125П", "суббота", TargetDate)
+    ExpectedSaturdayLessons = ["сб | 30.05.26 | 8:30-13:15 | ПМ.04 | Ефименко А.М. | 220"]
+    if not GroupExists or SaturdayLessons != ExpectedSaturdayLessons:
+        raise AssertionError(f"Граница блока практики не сработала для субботы: GroupExists={GroupExists}, Lessons={SaturdayLessons}")
+
+    FridayDate = date(2026, 5, 29)
+    GroupExists, FridayLessons = Parser.collectPracticeSchedule([PracticeBoundaryTable], "ИСП11-125П", "пятница", FridayDate)
+    ExpectedFridayLessons = ["пт | 29.05.26 | 8:30-13:15 | ПМ.04 | Ефименко А.М. | 220"]
+    if not GroupExists or FridayLessons != ExpectedFridayLessons:
+        raise AssertionError(f"Граница блока практики не сработала для пятницы: GroupExists={GroupExists}, Lessons={FridayLessons}")
+
+    ForbiddenFragments = [
+        "Время | Наименование модуля | Преподаватель",
+        "22.05.26",
+        "23.05.26",
+        "13:30-18:15",
+    ]
+    CombinedLessons = "\n".join(SaturdayLessons + FridayLessons)
+    for Fragment in ForbiddenFragments:
+        if Fragment in CombinedLessons:
+            raise AssertionError(f"Синтетический тест содержит запрещенный фрагмент {Fragment!r}: {CombinedLessons}")
+
     print("Synthetic practice tests: OK")
 
 

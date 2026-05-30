@@ -427,6 +427,32 @@ class ScheduleParser:
 
         return False
 
+    def rowHasDifferentExactDate(self, Text, TargetDate):
+        if not TargetDate:
+            return False
+
+        ExactDates = []
+        for Match in self.findDateMatches(Text):
+            if Match["is_range"]:
+                if Match["start"] == Match["end"]:
+                    ExactDates.append(Match["start"])
+                continue
+            ExactDates.append(Match["start"])
+
+        return bool(ExactDates) and TargetDate not in ExactDates
+
+    def isPracticeColumnHeaderRow(self, Text):
+        Normalized = self.normalize(Text)
+        Markers = [
+            "дата",
+            "время",
+            "наименованиемодуля",
+            "модуль",
+            "преподаватель",
+            "лаборатория",
+        ]
+        return sum(1 for Marker in Markers if Marker in Normalized) >= 2
+
     def stripGroupTokens(self, Text, Group=None):
         Result = str(Text or "")
         Result = re.sub(r"[А-ЯA-Z]{2,6}\s*-?\s*\d{1,2}\s*-?\s*\d{2,4}[А-ЯA-Z]?", " ", Result, flags=re.I)
@@ -435,6 +461,9 @@ class ScheduleParser:
         return self.cleanText(Result)
 
     def isPracticeLessonCandidate(self, Text, Group, Day, TargetDate=None):
+        if self.isPracticeColumnHeaderRow(Text):
+            return False
+
         Cleaned = self.stripGroupTokens(Text, Group)
         if not Cleaned:
             return False
@@ -507,10 +536,15 @@ class ScheduleParser:
                     DetectedDay = self.detectDay(RowText)
 
                     if RowIndex > GroupRow:
+                        if self.isPracticeColumnHeaderRow(RowText):
+                            break
                         if HasOtherGroup:
                             break
                         if self.isHeaderLikeRow(DataFrame, RowIndex) and not HasCurrentGroup:
                             break
+
+                    if self.rowHasDifferentExactDate(RowText, TargetDate):
+                        continue
 
                     if DetectedDay:
                         CurrentDay = DetectedDay
