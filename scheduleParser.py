@@ -394,6 +394,140 @@ class ScheduleParser:
         Line = f"{TimePart}: {Subject}" if TimePart else Subject
         return TimePart, Line
 
+
+    def rowDateMatches(self, Text, TargetDate=None):
+        Matches = []
+        for Match in self.findDateMatches(Text):
+            if TargetDate:
+                Matches.append(Match["start"] <= TargetDate <= Match["end"])
+            else:
+                Matches.append(True)
+        return Matches
+
+    def rowHasAnyDate(self, Text):
+        return bool(self.rowDateMatches(Text))
+
+    def rowHasTargetDate(self, Text, TargetDate):
+        if not TargetDate:
+            return False
+        return any(self.rowDateMatches(Text, TargetDate))
+
+    def stripGroupTokens(self, Text, Group=None):
+        Result = str(Text or "")
+        Result = re.sub(r"[А-ЯA-Z]{2,6}\s*-?\s*\d{1,2}\s*-?\s*\d{2,4}[А-ЯA-Z]?", " ", Result, flags=re.I)
+        if Group:
+            Result = Result.replace(Group, " ")
+        return self.cleanText(Result)
+
+    def isPracticeLessonCandidate(self, Text, Group, Day, TargetDate=None):
+        Cleaned = self.stripGroupTokens(Text, Group)
+        if not Cleaned:
+            return False
+
+        DayWords = "|".join(sorted({re.escape(Value) for Value in self.Days.values()}, key=len, reverse=True))
+        Cleaned = re.sub(rf"(^|[^а-яa-z])({DayWords})([^а-яa-z]|$)", " ", Cleaned, flags=re.I)
+        Cleaned = re.sub(r"(?<!\d)\d{1,2}\.\d{1,2}(?:\.\d{2,4})?(?!\.\d)", " ", Cleaned)
+        Cleaned = self.cleanText(re.sub(r"[|:;,.\-–—/\s]+", " ", Cleaned))
+        return bool(self.normalize(Cleaned))
+
+    def makePracticeLessonLine(self, DataFrame, RowIndex, GroupCols, GroupName):
+        RowText = self.rowText(DataFrame, RowIndex)
+        for GroupCol in GroupCols:
+            TimePart, LessonLine = self.makeLessonLine(DataFrame, RowIndex, GroupCol, GroupName)
+            if LessonLine and self.isPracticeLessonCandidate(LessonLine, GroupName, None):
+                return TimePart, LessonLine
+        if self.isPracticeLessonCandidate(RowText, GroupName, None):
+            return "", RowText
+        return "", ""
+
+    def collectPracticeSchedule(self, Tables, Group, Day, TargetDate=None):
+        GroupNormalized = self.normalizeGroup(Group)
+        if not GroupNormalized:
+            return False, []
+
+        Found = []
+        Seen = set()
+        GroupExists = False
+        DedupRemoved = 0
+
+        for Table in Tables:
+            if Table.Source != "Практики":
+                continue
+
+            DataFrame = Table.DataFrame
+            GroupRows = []
+            for RowIndex in range(len(DataFrame)):
+                RowText = self.rowText(DataFrame, RowIndex)
+                Tokens = self.extractGroupTokens(RowText)
+                if GroupNormalized in Tokens:
+                    GroupRows.append(RowIndex)
+
+            if GroupRows:
+                GroupExists = True
+            self.debugLog(f"{Table.Source} gid={Table.Gid} sheet={Table.SheetName}: строк группы в практиках={len(GroupRows)}")
+
+            for GroupRow in GroupRows:
+                GroupCols = [
+                    ColIndex
+                    for ColIndex in range(len(DataFrame.columns))
+                    if GroupNormalized in self.extractGroupTokens(DataFrame.iat[GroupRow, ColIndex])
+                ]
+                HeaderLikeGroupRow = self.isHeaderLikeRow(DataFrame, GroupRow)
+                CurrentDay = None
+                CurrentDateMatches = False
+                for ContextRow in range(max(0, GroupRow - 5), GroupRow + 1):
+                    ContextText = self.rowText(DataFrame, ContextRow)
+                    ContextDay = self.detectDay(ContextText)
+                    if ContextDay:
+                        CurrentDay = ContextDay
+                    if self.rowHasAnyDate(ContextText):
+                        CurrentDateMatches = self.rowHasTargetDate(ContextText, TargetDate)
+
+                for RowIndex in range(GroupRow, len(DataFrame)):
+                    RowText = self.rowText(DataFrame, RowIndex)
+                    Tokens = self.extractGroupTokens(RowText)
+                    HasCurrentGroup = GroupNormalized in Tokens
+                    HasOtherGroup = bool(Tokens and GroupNormalized not in Tokens)
+                    RowOwnDateMatches = self.rowHasTargetDate(RowText, TargetDate)
+                    DetectedDay = self.detectDay(RowText)
+
+                    if RowIndex > GroupRow:
+                        if HasOtherGroup:
+                            break
+                        if self.isHeaderLikeRow(DataFrame, RowIndex) and not HasCurrentGroup:
+                            break
+
+                    if DetectedDay:
+                        CurrentDay = DetectedDay
+                    if self.rowHasAnyDate(RowText):
+                        CurrentDateMatches = RowOwnDateMatches
+
+                    RowMatchesDate = RowOwnDateMatches or CurrentDateMatches
+                    RowMatchesDay = DetectedDay == Day or (CurrentDay == Day and not DetectedDay)
+                    if not RowMatchesDay and not RowMatchesDate:
+                        continue
+                    if DetectedDay == Day and not RowMatchesDate and not self.isPracticeLessonCandidate(RowText, Group, Day, TargetDate):
+                        continue
+
+                    TimePart, LessonLine = self.makePracticeLessonLine(
+                        DataFrame,
+                        RowIndex,
+                        GroupCols if HeaderLikeGroupRow else [],
+                        Group,
+                    )
+                    if not LessonLine:
+                        continue
+
+                    Key = f"{Day}|{GroupNormalized}|{self.normalize(TimePart)}|{self.normalize(LessonLine)}"
+                    if Key in Seen:
+                        DedupRemoved += 1
+                        continue
+                    Seen.add(Key)
+                    Found.append(LessonLine)
+
+        self.debugLog(f"Практики: группа={Group} день={Day}: найдена_группа={GroupExists} найдено={len(Found)} дублей_удалено={DedupRemoved}")
+        return GroupExists, Found
+
     def collectGroupSchedule(self, Tables, Group, Day):
         Found = []
         Seen = set()
@@ -434,7 +568,10 @@ class ScheduleParser:
         MainTables = self.filterTablesByDate([Table for Table in Tables if Table.Source == "Основное расписание"], TargetDate)
 
         PracticeGroupExists = self.hasGroupInTables(PracticeTables, Group)
-        PracticeLessons = self.collectGroupSchedule(PracticeTables, Group, Day)
+        PracticeFlexibleGroupExists, PracticeLessons = self.collectPracticeSchedule(PracticeTables, Group, Day, TargetDate)
+        PracticeGroupExists = PracticeGroupExists or PracticeFlexibleGroupExists
+        if not PracticeLessons:
+            PracticeLessons = self.collectGroupSchedule(PracticeTables, Group, Day)
         if PracticeLessons:
             return "Расписание практик", PracticeLessons
         if PracticeGroupExists:
